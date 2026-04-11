@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Tables{% endblock %}
+{% block content %}
+<h1>Tables</h1>
+<p><a class="btn btn-primary" href="{{ url_for('table_new') }}">+ New table</a></p>
+
+{% if tables %}
+<table>
+  <tr><th>Name</th><th>Transport</th><th>Topic</th><th>Durable</th><th>Index / Limit</th><th>Columns</th><th></th></tr>
+  {% for t in tables %}
+  <tr>
+    <td><strong>{{ t.name }}</strong></td>
+    <td>{{ t.transport_name }}</td>
+    <td><code>{{ t.topic or '—' }}</code></td>
+    <td>{{ t.durable or '—' }}</td>
+    <td>
+      {% if t.index %}index=<code>{{ t.index }}</code>
+      {% elif t.limit %}limit=<code>{{ t.limit }}</code>
+      {% else %}append{% endif %}
+    </td>
+    <td>{{ (t.schema or {})|length }}</td>
+    <td>
+      <a class="btn" href="{{ url_for('table_edit', name=t.name) }}">Edit</a>
+      <form class="inline" method="post" action="{{ url_for('table_delete', name=t.name) }}"
+            onsubmit="return confirm('Delete table {{ t.name }}?');">
+        <button class="btn btn-danger" type="submit">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No tables configured.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{{ 'New' if mode == 'new' else 'Edit' }} Table{% endblock %}
+{% block content %}
+<h1>{{ 'New table' if mode == 'new' else 'Edit table: ' + table.name }}</h1>
+
+<form method="post">
+  <label>Name
+    <input type="text" name="name" required value="{{ table.name if table else '' }}"
+           {{ 'readonly' if mode == 'edit' else '' }}>
+  </label>
+
+  <label>Transport
+    <select name="transport_name" required>
+      <option value="">— select transport —</option>
+      {% for t in transports %}
+        <option value="{{ t.name }}"
+                {% if table and table.transport_name == t.name %}selected{% endif %}>
+          {{ t.name }} ({{ t.type }})
+        </option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <label>Topic / Subject
+    <input type="text" name="topic" value="{{ table.topic if table else '' }}"
+           placeholder="e.g. FX/EXEC/&gt;  or  rates.ust.trades.&gt;">
+  </label>
+
+  <label>NATS subscribe mode (NATS transports only)
+    <select name="nats_mode">
+      {% for m in nats_modes %}
+        <option value="{{ m }}"
+                {% if (table and table.get('nats_mode', 'core') == m) or (not table and m == 'core') %}selected{% endif %}>
+          {{ m }}
+        </option>
+      {% endfor %}
+    </select>
+  </label>
+  <p class="muted" style="margin-top:.25rem">
+    <code>core</code> — non-persistent, no broker setup needed.
+    <code>jetstream</code> — requires a JetStream stream covering the subject; supports durable consumers.
+  </p>
+
+  <label>Durable consumer name (NATS JetStream only; leave empty for ephemeral)
+    <input type="text" name="durable" value="{{ table.durable or '' if table else '' }}"
+           placeholder="ignored when nats_mode = core">
+  </label>
+
+  <fieldset class="fieldset">
+    <legend>Update semantics</legend>
+    <p class="muted">Set <strong>index</strong> for upsert tables (keyed on a column) OR <strong>limit</strong> for rolling append tables. Not both.</p>
+    <label>Index column (upsert key)
+      <input type="text" name="index" value="{{ table.index or '' if table else '' }}">
+    </label>
+    <label>Limit (rolling window size, rows)
+      <input type="number" name="limit" value="{{ table.limit or '' if table else '' }}">
+    </label>
+  </fieldset>
+
+  <label>Schema
+    <textarea name="schema_text" rows="12" required
+              placeholder="one per line, format — column: type&#10;valid types: string, float, integer, boolean, datetime, date&#10;&#10;example:&#10;instrument: string&#10;bid: float&#10;ts: datetime">{{ schema_text }}</textarea>
+  </label>
+
+  <p style="margin-top: 1.5rem">
+    <button class="btn btn-primary" type="submit">Save</button>
+    <a class="btn" href="{{ url_for('tables_list') }}">Cancel</a>
+  </p>
+</form>
+{% endblock %}

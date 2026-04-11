@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Transports{% endblock %}
+{% block content %}
+<h1>Transports</h1>
+<p><a class="btn btn-primary" href="{{ url_for('transport_new') }}">+ New transport</a></p>
+
+{% if transports %}
+<table>
+  <tr><th>Name</th><th>Type</th><th>Config summary</th><th>Enabled</th><th></th></tr>
+  {% for t in transports %}
+  <tr>
+    <td><strong>{{ t.name }}</strong></td>
+    <td>{{ t.type }}</td>
+    <td><code>{{ t.config }}</code></td>
+    <td>{{ '✓' if t.enabled else '✗' }}</td>
+    <td>
+      <a class="btn" href="{{ url_for('transport_edit', name=t.name) }}">Edit</a>
+      <form class="inline" method="post" action="{{ url_for('transport_delete', name=t.name) }}"
+            onsubmit="return confirm('Delete transport {{ t.name }}?');">
+        <button class="btn btn-danger" type="submit">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No transports configured.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Vortex Admin</h1>
+<p class="muted">Manage transports and Perspective tables. Changes take effect the next time <code>vortex-server</code> restarts.</p>
+
+<h2>Transports ({{ transports|length }})</h2>
+{% if transports %}
+<table>
+  <tr><th>Name</th><th>Type</th><th>Enabled</th></tr>
+  {% for t in transports %}
+  <tr>
+    <td><a href="{{ url_for('transport_edit', name=t.name) }}">{{ t.name }}</a></td>
+    <td>{{ t.type }}</td>
+    <td>{{ '✓' if t.enabled else '✗' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No transports yet. <a href="{{ url_for('transport_new') }}">Add one</a>.</p>
+{% endif %}
+
+<h2>Tables ({{ tables|length }})</h2>
+{% if tables %}
+<table>
+  <tr><th>Name</th><th>Transport</th><th>Topic / Subject</th><th>Mode</th></tr>
+  {% for t in tables %}
+  <tr>
+    <td><a href="{{ url_for('table_edit', name=t.name) }}">{{ t.name }}</a></td>
+    <td>{{ t.transport_name }}</td>
+    <td><code>{{ t.topic or '—' }}</code></td>
+    <td>
+      {% if t.index %}index={{ t.index }}
+      {% elif t.limit %}limit={{ t.limit }}
+      {% else %}append{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No tables yet. <a href="{{ url_for('table_new') }}">Add one</a>.</p>
+{% endif %}
+{% endblock %}

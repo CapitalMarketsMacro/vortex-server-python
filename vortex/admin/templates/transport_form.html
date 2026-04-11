@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ 'New' if mode == 'new' else 'Edit' }} Transport{% endblock %}
+{% block content %}
+<h1>{{ 'New transport' if mode == 'new' else 'Edit transport: ' + transport.name }}</h1>
+
+<form method="post">
+  <label>Name
+    <input type="text" name="name" required value="{{ transport.name if transport else '' }}"
+           {{ 'readonly' if mode == 'edit' else '' }}>
+  </label>
+
+  <label>Type
+    <select name="type" id="type-select" onchange="showFieldsForType(this.value)">
+      {% for tt in transport_types %}
+        <option value="{{ tt }}" {% if transport and transport.type == tt %}selected{% endif %}>{{ tt }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <label>
+    <input type="checkbox" name="enabled"
+           {% if (transport and transport.enabled) or not transport %}checked{% endif %}>
+    Enabled
+  </label>
+
+  {% for ttype, fields in fields_by_type.items() %}
+  <fieldset class="fieldset type-fields" id="fields-{{ ttype }}"
+            {% if transport and transport.type != ttype %}style="display:none"{% endif %}
+            {% if not transport and ttype != transport_types[0] %}style="display:none"{% endif %}>
+    <legend>{{ ttype }} settings</legend>
+    {% for fname, flabel, is_pw in fields %}
+    <label>{{ flabel }}
+      <input
+        type="{{ 'password' if is_pw else 'text' }}"
+        name="config__{{ fname }}"
+        value="{{ transport.config.get(fname, '') if transport and transport.type == ttype else '' }}">
+    </label>
+    {% endfor %}
+  </fieldset>
+  {% endfor %}
+
+  <p style="margin-top: 1.5rem">
+    <button class="btn btn-primary" type="submit">Save</button>
+    <a class="btn" href="{{ url_for('transports_list') }}">Cancel</a>
+  </p>
+</form>
+
+<script>
+function showFieldsForType(ttype) {
+  document.querySelectorAll('.type-fields').forEach(el => el.style.display = 'none');
+  var el = document.getElementById('fields-' + ttype);
+  if (el) el.style.display = '';
+}
+</script>
+{% endblock %}
