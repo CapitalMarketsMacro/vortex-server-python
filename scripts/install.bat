@@ -11,31 +11,37 @@ set EXTRAS=dev
 if "%~1"=="--prod" set EXTRAS=
 
 REM ── Find Python 3.11+ ──────────────────────────────────────────────────
+REM Try py launcher first (standard on Windows), then python on PATH
 set PYTHON=
-for %%P in (python3.13 python3.12 python3.11 python3 python py) do (
-    where %%P >nul 2>&1 && (
-        for /f "tokens=*" %%V in ('%%P -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do (
-            set PYTHON=%%P
-        )
-    )
+
+where py >nul 2>&1
+if %ERRORLEVEL%==0 (
+    set PYTHON=py -3
+    goto :found
 )
 
-REM Try py launcher (Windows standard) with version flag
-if "%PYTHON%"=="" (
-    where py >nul 2>&1 && (
-        set PYTHON=py -3.11
-    )
+where python >nul 2>&1
+if %ERRORLEVEL%==0 (
+    set PYTHON=python
+    goto :found
 )
 
-if "%PYTHON%"=="" (
-    echo ERROR: Python 3.11+ is required but not found on PATH.
-    echo        Install Python 3.11+ and try again.
-    exit /b 1
-)
+echo ERROR: Python is not found on PATH.
+echo        Install Python 3.11+ from https://www.python.org and try again.
+exit /b 1
 
+:found
 echo === Vortex Install ===
 %PYTHON% --version
 echo.
+
+REM Verify version is 3.11+
+%PYTHON% -c "import sys; assert sys.version_info >= (3, 11), f'Python 3.11+ required, got {sys.version}'" 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Python 3.11+ is required.
+    %PYTHON% --version
+    exit /b 1
+)
 
 REM ── Create venv ────────────────────────────────────────────────────────
 if not exist .venv (
@@ -51,7 +57,7 @@ python -m pip install --upgrade pip --quiet
 
 REM ── Install ────────────────────────────────────────────────────────────
 if "%EXTRAS%"=="" (
-    echo Installing vortex-server-python (production only)...
+    echo Installing vortex-server-python production only...
     pip install -e . --quiet
 ) else (
     echo Installing vortex-server-python with [%EXTRAS%] extras...
