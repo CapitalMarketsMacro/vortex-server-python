@@ -1,5 +1,4 @@
 from __future__ import annotations
-import logging
 from typing import Any
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
@@ -9,8 +8,9 @@ from vortex.config.table_config import (
     TableConfig,
     schema_from_strings,
 )
+from vortex.observability import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class MongoStore:
@@ -28,7 +28,7 @@ class MongoStore:
         self.transports = self._db["transports"]
         self.tables = self._db["tables"]
         self._ensure_indexes()
-        logger.info("MongoStore: connected to %s db=%s", uri, database)
+        logger.info("mongo.connected", uri=uri, database=database)
 
     def _ensure_indexes(self) -> None:
         self.transports.create_index([("name", ASCENDING)], unique=True)

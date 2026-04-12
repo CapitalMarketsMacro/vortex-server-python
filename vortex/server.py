@@ -1,11 +1,10 @@
 from __future__ import annotations
 import asyncio
-import logging
 import signal
+import sys
 
 import perspective
 import tornado.web
-import tornado.ioloop
 from perspective.handlers.tornado import PerspectiveTornadoHandler
 
 from vortex.config.settings import load_settings
@@ -13,11 +12,17 @@ from vortex.config.table_config import TransportConfig
 from vortex.store.mongo import MongoStore
 from vortex.registry import TableRegistry
 from vortex.router import UpdateRouter
-from vortex.health import HealthHandler
+from vortex.health import LivenessHandler, ReadinessHandler, MetricsHandler
 from vortex.connectors.base import BaseConnector
 from vortex.connectors.nats import NATSConnector
 from vortex.connectors.solace import SolaceConnector
 from vortex.connectors.websocket_src import WSSourceConnector
+from vortex.observability import (
+    configure_logging,
+    get_logger,
+    new_correlation_id,
+    metrics,
+)
 
 
 _CONNECTOR_CLASSES: dict[str, type[BaseConnector]] = {
@@ -26,19 +31,37 @@ _CONNECTOR_CLASSES: dict[str, type[BaseConnector]] = {
     "ws": WSSourceConnector,
 }
 
+VERSION = "0.1.0"
 
-def configure_logging(level: str) -> None:
-    logging.basicConfig(
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        level=getattr(logging, level.upper(), logging.INFO),
-    )
+logger = get_logger("vortex.server")
 
 
-def make_tornado_app(psp_server, registry) -> tornado.web.Application:
+def _resolve_log_format(setting: str, level: str) -> bool:
+    """Translate log_format setting → json_output bool for configure_logging."""
+    s = (setting or "auto").lower()
+    if s == "json":
+        return True
+    if s == "console":
+        return False
+    # auto: console for DEBUG, json otherwise
+    return level.upper() != "DEBUG"
+
+
+def make_tornado_app(psp_server, registry, store, connectors, shutdown_flag) -> tornado.web.Application:
+    health_kwargs = {
+        "registry": registry,
+        "store": store,
+        "connectors": connectors,
+        "shutdown_flag": shutdown_flag,
+    }
     return tornado.web.Application(
         [
             (r"/websocket", PerspectiveTornadoHandler, {"perspective_server": psp_server}),
-            (r"/health", HealthHandler, {"registry": registry}),
+            (r"/health/live", LivenessHandler, health_kwargs),
+            (r"/health/ready", ReadinessHandler, health_kwargs),
+            # Backwards-compatible alias for the old /health endpoint
+            (r"/health", ReadinessHandler, health_kwargs),
+            (r"/metrics", MetricsHandler),
         ],
         websocket_ping_interval=30,
         websocket_ping_timeout=120,
@@ -48,9 +71,10 @@ def make_tornado_app(psp_server, registry) -> tornado.web.Application:
 def build_connector(transport: TransportConfig, registry, router) -> BaseConnector | None:
     cls = _CONNECTOR_CLASSES.get(transport.type)
     if cls is None:
-        logging.getLogger("vortex.server").error(
-            "Unknown transport type '%s' for '%s' — skipping",
-            transport.type, transport.name,
+        logger.error(
+            "transport.unknown_type",
+            transport=transport.name,
+            type=transport.type,
         )
         return None
     return cls(transport, registry, router)
@@ -58,19 +82,41 @@ def build_connector(transport: TransportConfig, registry, router) -> BaseConnect
 
 async def main() -> None:
     settings = load_settings()
-    configure_logging(settings.log_level)
-    logger = logging.getLogger("vortex.server")
+    json_output = _resolve_log_format(settings.log_format, settings.log_level)
+    configure_logging(level=settings.log_level, json_output=json_output)
 
-    logger.info("Starting VortexServerPython on %s:%d", settings.host, settings.port)
+    new_correlation_id()
+    metrics.SERVER_INFO.labels(version=VERSION).set(1)
+    metrics.SHUTTING_DOWN.set(0)
 
-    store = MongoStore(settings.mongo.uri, settings.mongo.database)
+    logger.info(
+        "server.starting",
+        version=VERSION,
+        host=settings.host,
+        port=settings.port,
+        log_level=settings.log_level,
+        log_format="json" if json_output else "console",
+    )
+
+    # ── Mongo ───────────────────────────────────────────────────────────────
+    try:
+        store = MongoStore(settings.mongo.uri, settings.mongo.database)
+        store._client.admin.command("ping")
+        metrics.MONGO_REACHABLE.set(1)
+    except Exception:
+        metrics.MONGO_REACHABLE.set(0)
+        logger.exception("server.mongo_unavailable", uri=settings.mongo.uri)
+        raise
+
     transport_configs = store.load_transport_configs()
     table_configs = store.load_table_configs()
     logger.info(
-        "Loaded %d transport(s) and %d table(s) from Mongo",
-        len(transport_configs), len(table_configs),
+        "server.config_loaded",
+        transports=len(transport_configs),
+        tables=len(table_configs),
     )
 
+    # ── Perspective engine ──────────────────────────────────────────────────
     psp_server = perspective.Server()
     local_client = psp_server.new_local_client()
 
@@ -79,63 +125,114 @@ async def main() -> None:
     for cfg in table_configs:
         if cfg.transport_name not in known_transports:
             logger.warning(
-                "Table '%s' references unknown transport '%s' — registering but no data will flow",
-                cfg.name, cfg.transport_name,
+                "table.unknown_transport",
+                table=cfg.name,
+                transport=cfg.transport_name,
             )
         registry.register(cfg)
 
     router = UpdateRouter()
 
+    # ── Connectors ──────────────────────────────────────────────────────────
     connectors: list[BaseConnector] = []
     for t in transport_configs:
         if not t.enabled:
-            logger.info("Transport '%s' disabled — skipping", t.name)
+            logger.info("transport.disabled", transport=t.name, type=t.type)
             continue
         conn = build_connector(t, registry, router)
         if conn is None:
             continue
-        try:
-            await conn.connect()
-            await conn.subscribe_all()
-            connectors.append(conn)
-        except Exception:
-            logger.exception("Transport '%s' failed to start", t.name)
+        connectors.append(conn)
 
-    app = make_tornado_app(psp_server, registry)
+    # Start supervisors. Each handles its own connect retries; we never
+    # block here on broker availability — that lets the readiness check
+    # surface the actual state instead of failing startup outright.
+    for conn in connectors:
+        await conn.start()
+
+    # ── Tornado ─────────────────────────────────────────────────────────────
+    shutdown_flag = asyncio.Event()
+    app = make_tornado_app(psp_server, registry, store, connectors, shutdown_flag)
     server = app.listen(settings.port, settings.host)
-    logger.info("Perspective WebSocket endpoint: ws://%s:%d/websocket", settings.host, settings.port)
-    logger.info("Health endpoint:                http://%s:%d/health", settings.host, settings.port)
+    logger.info(
+        "server.listening",
+        websocket=f"ws://{settings.host}:{settings.port}/websocket",
+        live=f"http://{settings.host}:{settings.port}/health/live",
+        ready=f"http://{settings.host}:{settings.port}/health/ready",
+        metrics_endpoint=f"http://{settings.host}:{settings.port}/metrics",
+    )
 
+    # ── Signals ─────────────────────────────────────────────────────────────
     stop_event = asyncio.Event()
 
-    def _handle_signal(*_):
-        logger.info("Shutdown signal received")
-        stop_event.set()
+    def _signal_received():
+        if not stop_event.is_set():
+            logger.info("server.signal_received")
+            stop_event.set()
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, _handle_signal)
+            loop.add_signal_handler(sig, _signal_received)
         except NotImplementedError:
-            # Windows doesn't support add_signal_handler for SIGTERM — fall back to default
-            signal.signal(sig, lambda *_: _handle_signal())
+            # Windows: add_signal_handler not supported for SIGTERM in some setups
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(_signal_received))
 
     await stop_event.wait()
 
-    logger.info("Shutting down connectors...")
-    for conn in connectors:
-        try:
-            await conn.disconnect()
-        except Exception:
-            logger.exception("Error disconnecting '%s'", conn.name)
+    # ── Graceful shutdown — bounded ─────────────────────────────────────────
+    metrics.SHUTTING_DOWN.set(1)
+    shutdown_flag.set()
+    logger.info("server.shutdown_started", timeout=settings.shutdown_timeout)
 
+    try:
+        await asyncio.wait_for(
+            _drain_and_close(server, connectors, store, settings.shutdown_timeout),
+            timeout=settings.shutdown_timeout + 5.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("server.shutdown_hard_timeout")
+
+    logger.info("server.shutdown_complete")
+
+
+async def _drain_and_close(
+    server,
+    connectors: list[BaseConnector],
+    store: MongoStore,
+    per_connector_timeout: float,
+) -> None:
+    # Stop accepting new connections immediately
     server.stop()
-    store.close()
-    logger.info("VortexServerPython stopped")
+    logger.info("server.tcp_listener_stopped")
+
+    # Stop connectors in parallel — each bounded by per_connector_timeout
+    if connectors:
+        results = await asyncio.gather(
+            *(c.stop(timeout=per_connector_timeout) for c in connectors),
+            return_exceptions=True,
+        )
+        for c, r in zip(connectors, results):
+            if isinstance(r, Exception):
+                logger.error(
+                    "server.connector_stop_error",
+                    transport=c.name,
+                    error=str(r),
+                    error_type=r.__class__.__name__,
+                )
+
+    try:
+        store.close()
+        logger.info("server.mongo_closed")
+    except Exception:
+        logger.exception("server.mongo_close_error")
 
 
 def run() -> None:
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == "__main__":

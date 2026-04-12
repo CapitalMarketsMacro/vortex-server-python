@@ -1,34 +1,69 @@
 from __future__ import annotations
-import logging
+import asyncio
 import nats
-from vortex.connectors.base import BaseConnector
-from vortex.config.table_config import TableConfig, TransportConfig
 
-logger = logging.getLogger(__name__)
+from vortex.connectors.base import BaseConnector
+from vortex.config.table_config import TableConfig
+from vortex.observability import get_logger
+
+logger = get_logger(__name__)
 
 
 class NATSConnector(BaseConnector):
-    def __init__(self, transport: TransportConfig, registry, router) -> None:
+    def __init__(self, transport, registry, router) -> None:
         super().__init__(transport, registry, router)
         self._nc = None
         self._js = None
+        self._disconnect_event = asyncio.Event()
 
-    async def connect(self) -> None:
+    async def _do_connect(self) -> None:
         cfg = self.transport.config
-        connect_kwargs: dict = {"servers": cfg.get("url", "nats://localhost:4222")}
+
+        async def _on_disconnected():
+            logger.warning("nats.disconnected")
+            self._connected.clear()
+            self._disconnect_event.set()
+
+        async def _on_reconnected():
+            logger.info("nats.reconnected")
+            self._connected.set()
+            self._disconnect_event.clear()
+
+        async def _on_error(e):
+            logger.error("nats.error", error=str(e), error_type=e.__class__.__name__)
+
+        async def _on_closed():
+            logger.warning("nats.closed")
+            self._disconnect_event.set()
+
+        connect_kwargs: dict = {
+            "servers": cfg.get("url", "nats://localhost:4222"),
+            "name": f"vortex-{self.name}",
+            "max_reconnect_attempts": -1,           # infinite — internal reconnect
+            "reconnect_time_wait": 2.0,
+            "ping_interval": 20,
+            "max_outstanding_pings": 5,
+            "disconnected_cb": _on_disconnected,
+            "reconnected_cb": _on_reconnected,
+            "error_cb": _on_error,
+            "closed_cb": _on_closed,
+        }
         if cfg.get("user"):
             connect_kwargs["user"] = cfg["user"]
             connect_kwargs["password"] = cfg.get("password")
         if cfg.get("token"):
             connect_kwargs["token"] = cfg["token"]
 
+        self._disconnect_event.clear()
         self._nc = await nats.connect(**connect_kwargs)
         self._js = self._nc.jetstream()
-        self._connected = True
-        logger.info("[%s] NATSConnector: connected to %s", self.name, connect_kwargs["servers"])
+        logger.info("nats.connected", url=connect_kwargs["servers"])
 
-    async def subscribe_all(self) -> None:
+    async def _do_subscribe(self) -> None:
         configs: list[TableConfig] = self.registry.tables_by_transport(self.name)
+        if not configs:
+            logger.info("nats.no_tables", transport=self.name)
+            return
         for cfg in configs:
             await self._subscribe_one(cfg)
 
@@ -39,7 +74,10 @@ class NATSConnector(BaseConnector):
         async def handler(msg):
             await self._dispatch(table_name, msg.data)
             if is_jetstream:
-                await msg.ack()
+                try:
+                    await msg.ack()
+                except Exception:
+                    logger.exception("nats.ack_failed", table=table_name)
 
         if is_jetstream:
             try:
@@ -51,27 +89,65 @@ class NATSConnector(BaseConnector):
                     kwargs["durable"] = cfg.durable
                 await self._js.subscribe(cfg.topic, **kwargs)
                 logger.info(
-                    "[%s] JetStream subscribe '%s' → table '%s' (durable=%s)",
-                    self.name, cfg.topic, table_name, cfg.durable or "<ephemeral>",
+                    "nats.subscribed",
+                    mode="jetstream",
+                    subject=cfg.topic,
+                    table=table_name,
+                    durable=cfg.durable or "<ephemeral>",
                 )
             except Exception as e:
                 logger.error(
-                    "[%s] !! TABLE '%s' WILL RECEIVE NO DATA !! "
-                    "JetStream subscribe to '%s' (durable=%s) failed: %s. "
-                    "Likely cause: no JetStream stream covers this subject. "
-                    "Either create a stream on the broker, or set nats_mode='core' "
-                    "on this table to use a non-persistent core NATS subscribe.",
-                    self.name, table_name, cfg.topic, cfg.durable, e,
+                    "nats.subscribe_failed",
+                    mode="jetstream",
+                    subject=cfg.topic,
+                    table=table_name,
+                    durable=cfg.durable,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                    hint="No JetStream stream covers this subject. "
+                         "Create one or set nats_mode='core'.",
                 )
         else:
             await self._nc.subscribe(cfg.topic, cb=handler)
             logger.info(
-                "[%s] core subscribe '%s' → table '%s'",
-                self.name, cfg.topic, table_name,
+                "nats.subscribed",
+                mode="core",
+                subject=cfg.topic,
+                table=table_name,
             )
 
-    async def disconnect(self) -> None:
-        if self._nc:
+    async def _wait_until_done(self) -> None:
+        """
+        Wake up if the underlying NATS client closes (after exhausting its
+        own reconnect attempts) or if shutdown is requested.
+        """
+        stop_task = asyncio.create_task(self._stopping.wait(), name=f"{self.name}-stop")
+        disc_task = asyncio.create_task(self._disconnect_event.wait(), name=f"{self.name}-disc")
+        try:
+            done, pending = await asyncio.wait(
+                {stop_task, disc_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+            if stop_task in done:
+                return
+            raise ConnectionError("nats client closed")
+        finally:
+            for t in (stop_task, disc_task):
+                if not t.done():
+                    t.cancel()
+
+    async def _do_disconnect(self) -> None:
+        if self._nc is None:
+            return
+        try:
             await self._nc.drain()
-            self._connected = False
-            logger.info("[%s] NATSConnector: disconnected", self.name)
+        except Exception:
+            try:
+                await self._nc.close()
+            except Exception:
+                pass
+        finally:
+            self._nc = None
+            self._js = None
+            logger.info("nats.disconnected_clean")

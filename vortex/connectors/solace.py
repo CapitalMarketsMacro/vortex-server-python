@@ -1,10 +1,11 @@
 from __future__ import annotations
 import asyncio
-import logging
-from vortex.connectors.base import BaseConnector
-from vortex.config.table_config import TableConfig, TransportConfig
 
-logger = logging.getLogger(__name__)
+from vortex.connectors.base import BaseConnector
+from vortex.config.table_config import TableConfig
+from vortex.observability import get_logger
+
+logger = get_logger(__name__)
 
 try:
     from solace.messaging.messaging_service import MessagingService
@@ -13,22 +14,19 @@ try:
     _SOLACE_AVAILABLE = True
 except ImportError:
     _SOLACE_AVAILABLE = False
-    logger.warning(
-        "solace-pubsubplus not installed or import failed — SolaceConnector disabled"
-    )
+    logger.warning("solace.import_failed", hint="solace-pubsubplus not installed")
 
 
 class SolaceConnector(BaseConnector):
-    def __init__(self, transport: TransportConfig, registry, router) -> None:
+    def __init__(self, transport, registry, router) -> None:
         super().__init__(transport, registry, router)
         self._service = None
         self._receiver = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    async def connect(self) -> None:
+    async def _do_connect(self) -> None:
         if not _SOLACE_AVAILABLE:
-            logger.error("[%s] solace-pubsubplus unavailable, skipping connect", self.name)
-            return
+            raise RuntimeError("solace-pubsubplus unavailable")
 
         self._loop = asyncio.get_running_loop()
         cfg = self.transport.config
@@ -40,6 +38,10 @@ class SolaceConnector(BaseConnector):
             "solace.messaging.service.vpn-name": cfg.get("vpn", "default"),
             "solace.messaging.authentication.scheme.basic.username": cfg.get("username", ""),
             "solace.messaging.authentication.scheme.basic.password": cfg.get("password", ""),
+            # SDK-managed reconnection
+            "solace.messaging.transport.reconnection.attempts": "-1",
+            "solace.messaging.transport.reconnection.attempts.wait-interval": "3000",
+            "solace.messaging.transport.connection-retries": "5",
         }
 
         self._service = (
@@ -47,18 +49,19 @@ class SolaceConnector(BaseConnector):
             .from_properties(broker_props)
             .build()
         )
+        # Solace connect is blocking — run in executor so we don't block the loop
         await self._loop.run_in_executor(None, self._service.connect)
-        self._connected = True
-        logger.info(
-            "[%s] SolaceConnector: connected to %s vpn=%s",
-            self.name, host, cfg.get("vpn"),
-        )
+        logger.info("solace.connected", host=host, vpn=cfg.get("vpn"))
 
-    async def subscribe_all(self) -> None:
-        if not self._connected or not _SOLACE_AVAILABLE:
+    async def _do_subscribe(self) -> None:
+        if not _SOLACE_AVAILABLE:
             return
 
         configs: list[TableConfig] = self.registry.tables_by_transport(self.name)
+        if not configs:
+            logger.info("solace.no_tables", transport=self.name)
+            return
+
         subscriptions = [TopicSubscription.of(cfg.topic) for cfg in configs]
         name_map = {cfg.topic: cfg.name for cfg in configs}
 
@@ -89,12 +92,22 @@ class SolaceConnector(BaseConnector):
         )
         self._receiver.start()
         self._receiver.receive_async(VortexMessageHandler())
-        logger.info("[%s] subscribed to %d topic(s)", self.name, len(subscriptions))
+        logger.info("solace.subscribed", count=len(subscriptions))
 
-    async def disconnect(self) -> None:
-        if self._receiver:
-            await self._loop.run_in_executor(None, self._receiver.terminate)
-        if self._service:
-            await self._loop.run_in_executor(None, self._service.disconnect)
-        self._connected = False
-        logger.info("[%s] SolaceConnector: disconnected", self.name)
+    async def _do_disconnect(self) -> None:
+        loop = self._loop or asyncio.get_running_loop()
+        if self._receiver is not None:
+            try:
+                await loop.run_in_executor(None, self._receiver.terminate)
+            except Exception:
+                logger.exception("solace.receiver_terminate_failed")
+            finally:
+                self._receiver = None
+        if self._service is not None:
+            try:
+                await loop.run_in_executor(None, self._service.disconnect)
+            except Exception:
+                logger.exception("solace.service_disconnect_failed")
+            finally:
+                self._service = None
+        logger.info("solace.disconnected_clean")

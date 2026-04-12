@@ -1,15 +1,15 @@
 from __future__ import annotations
-import logging
 from vortex.config.table_config import TableConfig
+from vortex.observability import get_logger, metrics
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class TableRegistry:
     """
     Owns all Perspective Table instances.
-    Created once at startup; connector threads and the Tornado loop
-    both read from it (read is safe; update() is called from the loop).
+    Created once at startup; connector tasks and the Tornado loop both read
+    from it. update() is always called from the asyncio loop.
     """
 
     def __init__(self, client) -> None:
@@ -27,9 +27,13 @@ class TableRegistry:
         table = self._client.table(cfg.schema, name=cfg.name, **kwargs)
         self._tables[cfg.name] = table
         self._configs[cfg.name] = cfg
+        metrics.TABLES_REGISTERED.set(len(self._tables))
         logger.info(
-            "Registered table '%s'  index=%s  limit=%s  transport=%s",
-            cfg.name, cfg.index, cfg.limit, cfg.transport_name,
+            "table.registered",
+            table=cfg.name,
+            index=cfg.index,
+            limit=cfg.limit,
+            transport=cfg.transport_name,
         )
         return table
 

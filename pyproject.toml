@@ -19,6 +19,8 @@ dependencies = [
     "pyarrow>=16.0",
     "pymongo>=4.8",
     "flask>=3.0",
+    "structlog>=24.1",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]

@@ -22,7 +22,11 @@ class VortexSettings(BaseSettings):
 
     port: int = 8080
     host: str = "0.0.0.0"
+
+    # Observability
     log_level: str = "INFO"
+    log_format: str = "auto"          # auto | json | console
+    shutdown_timeout: float = 30.0    # seconds — bounded graceful shutdown
 
     mongo: MongoSettings = MongoSettings()
     admin: AdminSettings = AdminSettings()
