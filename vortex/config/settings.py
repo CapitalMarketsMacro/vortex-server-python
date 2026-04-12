@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class MongoSettings(BaseModel):
-    uri: str = "mongodb://MontuNobleNumbat2404:27017/"
+    uri: str = "mongodb://localhost:27017/"
     database: str = "Vortex"
 
 

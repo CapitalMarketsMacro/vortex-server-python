@@ -1,0 +1,22 @@
+# ── Vortex Admin GUI ────────────────────────────────────────────────────────
+# Lightweight Flask app for transport/table CRUD and live status dashboard.
+# Separate image from the data server — different scaling and lifecycle.
+#
+# All runtime config comes from VORTEX_* env vars — see .env.example.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir -e .
+
+COPY vortex/ ./vortex/
+
+EXPOSE 8090
+
+ENV VORTEX_ADMIN__HOST=0.0.0.0 \
+    VORTEX_ADMIN__PORT=8090 \
+    VORTEX_LOG_LEVEL=INFO
+
+CMD ["vortex-admin"]
