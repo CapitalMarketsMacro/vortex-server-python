@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}Live Status{% endblock %}
+{% block content %}
+
+<style>
+  .status-bar { display: flex; gap: 1.5rem; align-items: center; padding: .75rem 1rem;
+                background: #f5f5f5; border-radius: 6px; margin-bottom: 1.5rem; font-size: .9rem; }
+  .pill { display: inline-block; padding: .15rem .55rem; border-radius: 999px;
+          font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+  .pill.up    { background: #d4edda; color: #155724; }
+  .pill.down  { background: #f8d7da; color: #721c24; }
+  .pill.warn  { background: #fff3cd; color: #856404; }
+  .num { font-variant-numeric: tabular-nums; text-align: right; }
+  .sub { color: #888; font-size: .75rem; }
+  .err-banner { background: #f8d7da; color: #721c24; padding: .75rem 1rem;
+                border: 1px solid #f5c6cb; border-radius: 4px; margin-bottom: 1rem; }
+  h2 { margin-top: 1.75rem; }
+</style>
+
+<h1>Live Status</h1>
+<p class="muted">Polling <code id="vortex-url">{{ vortex_url }}/api/status</code> every 2 seconds.</p>
+
+<div id="error-banner" class="err-banner" style="display:none"></div>
+
+<div class="status-bar">
+  <div><strong>Server</strong> <span id="server-state" class="pill down">unknown</span></div>
+  <div><strong>Version</strong> <span id="server-version">—</span></div>
+  <div><strong>Uptime</strong> <span id="server-uptime">—</span></div>
+  <div><strong>Mongo</strong> <span id="mongo-state" class="pill down">unknown</span></div>
+  <div style="margin-left:auto" class="sub">Last update: <span id="last-update">—</span></div>
+</div>
+
+<h2>Transports</h2>
+<table>
+  <thead>
+    <tr><th>Name</th><th>Type</th><th>State</th><th class="num">Restarts</th><th>Tables</th></tr>
+  </thead>
+  <tbody id="transports-body">
+    <tr><td colspan="5" class="muted">loading…</td></tr>
+  </tbody>
+</table>
+
+<h2>Tables</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Transport</th>
+      <th>Topic</th>
+      <th>Mode</th>
+      <th class="num">Rows</th>
+      <th class="num">Msgs/sec</th>
+      <th class="num">Total received</th>
+      <th class="num">Dropped</th>
+      <th class="num">p50 / p99 (ms)</th>
+    </tr>
+  </thead>
+  <tbody id="tables-body">
+    <tr><td colspan="9" class="muted">loading…</td></tr>
+  </tbody>
+</table>
+
+<script>
+(() => {
+  const POLL_MS = 2000;
+  const lastByTable = new Map();   // table -> {received, ts}
+
+  function fmtUptime(s) {
+    if (s == null) return '—';
+    s = Math.floor(s);
+    const d = Math.floor(s / 86400); s %= 86400;
+    const h = Math.floor(s / 3600);  s %= 3600;
+    const m = Math.floor(s / 60);    s %= 60;
+    if (d) return `${d}d ${h}h ${m}m`;
+    if (h) return `${h}h ${m}m ${s}s`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function fmtNum(n) {
+    if (n == null || isNaN(n)) return '—';
+    return Number(n).toLocaleString();
+  }
+
+  function fmtRate(n) {
+    if (n == null || isNaN(n)) return '—';
+    if (n < 1) return n.toFixed(2);
+    if (n < 10) return n.toFixed(1);
+    return Math.round(n).toLocaleString();
+  }
+
+  function pill(text, cls) {
+    return `<span class="pill ${cls}">${text}</span>`;
+  }
+
+  function setBanner(msg) {
+    const el = document.getElementById('error-banner');
+    if (!msg) { el.style.display = 'none'; return; }
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function render(snapshot) {
+    const proxy = snapshot._admin_proxy || {};
+    if (proxy.reachable === false) {
+      setBanner(`vortex-server unreachable at ${proxy.url}: ${proxy.error || 'unknown error'}`);
+      document.getElementById('server-state').className = 'pill down';
+      document.getElementById('server-state').textContent = 'unreachable';
+      document.getElementById('mongo-state').className = 'pill down';
+      document.getElementById('mongo-state').textContent = 'unknown';
+      document.getElementById('server-version').textContent = '—';
+      document.getElementById('server-uptime').textContent = '—';
+      document.getElementById('transports-body').innerHTML =
+        '<tr><td colspan="5" class="muted">no data</td></tr>';
+      document.getElementById('tables-body').innerHTML =
+        '<tr><td colspan="9" class="muted">no data</td></tr>';
+      return;
+    }
+    setBanner(null);
+
+    // Header bar
+    const live = !snapshot.shutting_down;
+    document.getElementById('server-state').className = 'pill ' + (live ? 'up' : 'warn');
+    document.getElementById('server-state').textContent = snapshot.shutting_down ? 'shutting down' : 'live';
+    document.getElementById('server-version').textContent = snapshot.version || '—';
+    document.getElementById('server-uptime').textContent = fmtUptime(snapshot.uptime_seconds);
+    document.getElementById('mongo-state').className = 'pill ' + (snapshot.mongo_reachable ? 'up' : 'down');
+    document.getElementById('mongo-state').textContent = snapshot.mongo_reachable ? 'reachable' : 'down';
+    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+
+    // Transports
+    const tBody = document.getElementById('transports-body');
+    if (!snapshot.transports || snapshot.transports.length === 0) {
+      tBody.innerHTML = '<tr><td colspan="5" class="muted">no transports configured</td></tr>';
+    } else {
+      tBody.innerHTML = snapshot.transports.map(t => `
+        <tr>
+          <td><strong>${t.name}</strong></td>
+          <td>${t.type}</td>
+          <td>${t.connected ? pill('connected', 'up') : pill('disconnected', 'down')}</td>
+          <td class="num">${fmtNum(t.restarts_total)}</td>
+          <td>${(t.tables || []).map(x => `<code>${x}</code>`).join(' ')}</td>
+        </tr>`).join('');
+    }
+
+    // Tables
+    const now = Date.now() / 1000;
+    const tableBody = document.getElementById('tables-body');
+    if (!snapshot.tables || snapshot.tables.length === 0) {
+      tableBody.innerHTML = '<tr><td colspan="9" class="muted">no tables registered</td></tr>';
+    } else {
+      tableBody.innerHTML = snapshot.tables.map(tb => {
+        // Compute rate from previous sample
+        const prev = lastByTable.get(tb.name);
+        let rate = null;
+        if (prev) {
+          const dt = now - prev.ts;
+          if (dt > 0.05) {
+            rate = (tb.messages_received_total - prev.received) / dt;
+            if (rate < 0) rate = 0;
+          }
+        }
+        lastByTable.set(tb.name, { received: tb.messages_received_total, ts: now });
+
+        const lat = tb.dispatch_latency || {};
+        const p50 = lat.p50_seconds != null ? (lat.p50_seconds * 1000).toFixed(2) : '—';
+        const p99 = lat.p99_seconds != null ? (lat.p99_seconds * 1000).toFixed(2) : '—';
+        const transportCell = tb.transport_connected
+          ? `${tb.transport_name} ${pill('up', 'up')}`
+          : `${tb.transport_name || '—'} ${pill('down', 'down')}`;
+        const mode = tb.nats_mode || (tb.index ? 'upsert' : 'append');
+        return `
+          <tr>
+            <td><strong>${tb.name}</strong></td>
+            <td>${transportCell}</td>
+            <td><code>${tb.topic || '—'}</code></td>
+            <td>${mode}</td>
+            <td class="num">${fmtNum(tb.row_count)}</td>
+            <td class="num"><strong>${fmtRate(rate)}</strong></td>
+            <td class="num">${fmtNum(tb.messages_received_total)}</td>
+            <td class="num">${fmtNum(tb.messages_dropped_total)}</td>
+            <td class="num">${p50} / ${p99}</td>
+          </tr>`;
+      }).join('');
+    }
+  }
+
+  async function tick() {
+    try {
+      const r = await fetch('{{ url_for("api_status") }}', { cache: 'no-store' });
+      const data = await r.json();
+      render(data);
+    } catch (e) {
+      setBanner(`admin proxy error: ${e}`);
+    }
+  }
+
+  tick();
+  setInterval(tick, POLL_MS);
+})();
+</script>
+
+{% endblock %}

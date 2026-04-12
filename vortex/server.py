@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 
 import perspective
 import tornado.web
@@ -13,6 +14,7 @@ from vortex.store.mongo import MongoStore
 from vortex.registry import TableRegistry
 from vortex.router import UpdateRouter
 from vortex.health import LivenessHandler, ReadinessHandler, MetricsHandler
+from vortex.status import StatusHandler
 from vortex.connectors.base import BaseConnector
 from vortex.connectors.nats import NATSConnector
 from vortex.connectors.solace import SolaceConnector
@@ -47,11 +49,19 @@ def _resolve_log_format(setting: str, level: str) -> bool:
     return level.upper() != "DEBUG"
 
 
-def make_tornado_app(psp_server, registry, store, connectors, shutdown_flag) -> tornado.web.Application:
+def make_tornado_app(psp_server, registry, store, connectors, shutdown_flag, start_time) -> tornado.web.Application:
     health_kwargs = {
         "registry": registry,
         "store": store,
         "connectors": connectors,
+        "shutdown_flag": shutdown_flag,
+    }
+    status_kwargs = {
+        "registry": registry,
+        "store": store,
+        "connectors": connectors,
+        "start_time": start_time,
+        "version": VERSION,
         "shutdown_flag": shutdown_flag,
     }
     return tornado.web.Application(
@@ -62,6 +72,7 @@ def make_tornado_app(psp_server, registry, store, connectors, shutdown_flag) -> 
             # Backwards-compatible alias for the old /health endpoint
             (r"/health", ReadinessHandler, health_kwargs),
             (r"/metrics", MetricsHandler),
+            (r"/api/status", StatusHandler, status_kwargs),
         ],
         websocket_ping_interval=30,
         websocket_ping_timeout=120,
@@ -88,6 +99,7 @@ async def main() -> None:
     new_correlation_id()
     metrics.SERVER_INFO.labels(version=VERSION).set(1)
     metrics.SHUTTING_DOWN.set(0)
+    start_time = time.monotonic()
 
     logger.info(
         "server.starting",
@@ -152,7 +164,7 @@ async def main() -> None:
 
     # ── Tornado ─────────────────────────────────────────────────────────────
     shutdown_flag = asyncio.Event()
-    app = make_tornado_app(psp_server, registry, store, connectors, shutdown_flag)
+    app = make_tornado_app(psp_server, registry, store, connectors, shutdown_flag, start_time)
     server = app.listen(settings.port, settings.host)
     logger.info(
         "server.listening",
@@ -160,6 +172,7 @@ async def main() -> None:
         live=f"http://{settings.host}:{settings.port}/health/live",
         ready=f"http://{settings.host}:{settings.port}/health/ready",
         metrics_endpoint=f"http://{settings.host}:{settings.port}/metrics",
+        status=f"http://{settings.host}:{settings.port}/api/status",
     )
 
     # ── Signals ─────────────────────────────────────────────────────────────

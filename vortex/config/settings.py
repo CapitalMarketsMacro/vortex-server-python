@@ -12,6 +12,8 @@ class AdminSettings(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8090
     secret_key: str = "vortex-admin-dev-secret"
+    vortex_url: str = "http://localhost:8080"   # base URL of the Vortex data server
+    vortex_status_timeout: float = 2.0
 
 
 class VortexSettings(BaseSettings):

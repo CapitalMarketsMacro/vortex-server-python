@@ -1,5 +1,8 @@
 from __future__ import annotations
+import json
 import logging
+import urllib.error
+import urllib.request
 from flask import Flask, render_template, request, redirect, url_for, flash, abort, jsonify
 
 from vortex.config.settings import load_settings
@@ -65,10 +68,17 @@ def _schema_to_textarea(schema: dict[str, str]) -> str:
     return "\n".join(f"{col}: {typ}" for col, typ in schema.items())
 
 
-def create_app(store: MongoStore, secret_key: str = "dev") -> Flask:
+def create_app(
+    store: MongoStore,
+    secret_key: str = "dev",
+    vortex_url: str = "http://localhost:8080",
+    vortex_status_timeout: float = 2.0,
+) -> Flask:
     app = Flask(__name__, template_folder="templates")
     app.secret_key = secret_key
     app.config["STORE"] = store
+    app.config["VORTEX_URL"] = vortex_url.rstrip("/")
+    app.config["VORTEX_STATUS_TIMEOUT"] = vortex_status_timeout
 
     @app.after_request
     def _cors(response):
@@ -79,6 +89,50 @@ def create_app(store: MongoStore, secret_key: str = "dev") -> Flask:
             response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = "Content-Type"
         return response
+
+    # ── Live status page (HTML) ────────────────────────────────────────────
+    @app.route("/status")
+    def status_page():
+        return render_template(
+            "status.html",
+            vortex_url=app.config["VORTEX_URL"],
+        )
+
+    # ── Live status proxy (JSON, called by status page JS) ─────────────────
+    @app.route("/api/status", methods=["GET", "OPTIONS"])
+    def api_status():
+        if request.method == "OPTIONS":
+            return ("", 204)
+        url = app.config["VORTEX_URL"] + "/api/status"
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(
+                req, timeout=app.config["VORTEX_STATUS_TIMEOUT"]
+            ) as r:
+                body = json.loads(r.read())
+            body["_admin_proxy"] = {"reachable": True, "url": url}
+            return jsonify(body)
+        except urllib.error.URLError as e:
+            return jsonify({
+                "_admin_proxy": {
+                    "reachable": False,
+                    "url": url,
+                    "error": str(e.reason if hasattr(e, "reason") else e),
+                },
+                "version": None,
+                "uptime_seconds": 0,
+                "shutting_down": False,
+                "mongo_reachable": False,
+                "transports": [],
+                "tables": [],
+            }), 200
+        except Exception as e:
+            return jsonify({
+                "_admin_proxy": {"reachable": False, "url": url, "error": str(e)},
+                "version": None,
+                "transports": [],
+                "tables": [],
+            }), 200
 
     # ── REST API (read-only) ───────────────────────────────────────────────
     @app.route("/api/tables", methods=["GET", "OPTIONS"])
@@ -324,10 +378,15 @@ def run() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = load_settings()
     store = MongoStore(settings.mongo.uri, settings.mongo.database)
-    app = create_app(store, secret_key=settings.admin.secret_key)
+    app = create_app(
+        store,
+        secret_key=settings.admin.secret_key,
+        vortex_url=settings.admin.vortex_url,
+        vortex_status_timeout=settings.admin.vortex_status_timeout,
+    )
     logger.info(
-        "vortex-admin running on http://%s:%d",
-        settings.admin.host, settings.admin.port,
+        "vortex-admin running on http://%s:%d  (vortex=%s)",
+        settings.admin.host, settings.admin.port, settings.admin.vortex_url,
     )
     app.run(host=settings.admin.host, port=settings.admin.port, debug=False)
 
