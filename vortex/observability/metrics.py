@@ -52,6 +52,20 @@ TABLES_REGISTERED = Gauge(
 )
 
 
+# ── Client connections (Perspective WebSocket) ───────────────────────────────
+
+WS_CLIENTS = Gauge(
+    f"{NAMESPACE}_websocket_clients",
+    "Currently open Perspective WebSocket sessions.",
+)
+
+TABLE_CONSUMERS = Gauge(
+    f"{NAMESPACE}_table_consumers",
+    "Number of currently connected sessions that have requested a given table.",
+    ["table"],
+)
+
+
 # ── Mongo store ──────────────────────────────────────────────────────────────
 
 MONGO_REACHABLE = Gauge(
@@ -85,4 +99,6 @@ __all__ = [
     "MONGO_REACHABLE",
     "SERVER_INFO",
     "SHUTTING_DOWN",
+    "WS_CLIENTS",
+    "TABLE_CONSUMERS",
 ]

@@ -128,12 +128,14 @@ class StatusHandler(tornado.web.RequestHandler):
                 "vortex_messages_dropped_total",
                 transport=transport_name or "", reason="dispatch_error",
             ) or 0.0
+            consumers = _sample("vortex_table_consumers", table=name) or 0.0
 
             tables_out.append({
                 "name": name,
                 "transport_name": transport_name,
                 "transport_connected": bool(connector and connector.is_up()),
                 "row_count": row_count,
+                "consumers": int(consumers),
                 "messages_received_total": received,
                 "messages_dropped_total": dropped_unknown + dropped_err,
                 "dispatch_latency": _histogram_summary(
@@ -145,11 +147,14 @@ class StatusHandler(tornado.web.RequestHandler):
                 "nats_mode": cfg.nats_mode if cfg else None,
             })
 
+        ws_clients = _sample("vortex_websocket_clients") or 0.0
+
         body = {
             "version": self._version,
             "uptime_seconds": round(time.monotonic() - self._start_time, 2),
             "shutting_down": self._shutdown_flag.is_set(),
             "mongo_reachable": mongo_ok,
+            "websocket_clients": int(ws_clients),
             "timestamp": time.time(),
             "transports": transports_out,
             "tables": tables_out,

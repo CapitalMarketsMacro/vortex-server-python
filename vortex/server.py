@@ -6,8 +6,8 @@ import time
 
 import perspective
 import tornado.web
-from perspective.handlers.tornado import PerspectiveTornadoHandler
 
+from vortex.perspective_handler import TrackedPerspectiveHandler
 from vortex.config.settings import load_settings
 from vortex.config.table_config import TransportConfig
 from vortex.store.mongo import MongoStore
@@ -66,7 +66,10 @@ def make_tornado_app(psp_server, registry, store, connectors, shutdown_flag, sta
     }
     return tornado.web.Application(
         [
-            (r"/websocket", PerspectiveTornadoHandler, {"perspective_server": psp_server}),
+            (r"/websocket", TrackedPerspectiveHandler, {
+                "perspective_server": psp_server,
+                "get_table_names": lambda: list(registry.all_tables().keys()),
+            }),
             (r"/health/live", LivenessHandler, health_kwargs),
             (r"/health/ready", ReadinessHandler, health_kwargs),
             # Backwards-compatible alias for the old /health endpoint

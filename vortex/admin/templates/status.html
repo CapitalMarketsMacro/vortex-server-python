@@ -27,6 +27,7 @@
   <div><strong>Version</strong> <span id="server-version">—</span></div>
   <div><strong>Uptime</strong> <span id="server-uptime">—</span></div>
   <div><strong>Mongo</strong> <span id="mongo-state" class="pill down">unknown</span></div>
+  <div><strong>WS clients</strong> <span id="ws-clients" class="num">—</span></div>
   <div style="margin-left:auto" class="sub">Last update: <span id="last-update">—</span></div>
 </div>
 
@@ -49,6 +50,7 @@
       <th>Topic</th>
       <th>Mode</th>
       <th class="num">Rows</th>
+      <th class="num">Consumers</th>
       <th class="num">Msgs/sec</th>
       <th class="num">Total received</th>
       <th class="num">Dropped</th>
@@ -56,7 +58,7 @@
     </tr>
   </thead>
   <tbody id="tables-body">
-    <tr><td colspan="9" class="muted">loading…</td></tr>
+    <tr><td colspan="10" class="muted">loading…</td></tr>
   </tbody>
 </table>
 
@@ -110,10 +112,11 @@
       document.getElementById('mongo-state').textContent = 'unknown';
       document.getElementById('server-version').textContent = '—';
       document.getElementById('server-uptime').textContent = '—';
+      document.getElementById('ws-clients').textContent = '—';
       document.getElementById('transports-body').innerHTML =
         '<tr><td colspan="5" class="muted">no data</td></tr>';
       document.getElementById('tables-body').innerHTML =
-        '<tr><td colspan="9" class="muted">no data</td></tr>';
+        '<tr><td colspan="10" class="muted">no data</td></tr>';
       return;
     }
     setBanner(null);
@@ -126,6 +129,7 @@
     document.getElementById('server-uptime').textContent = fmtUptime(snapshot.uptime_seconds);
     document.getElementById('mongo-state').className = 'pill ' + (snapshot.mongo_reachable ? 'up' : 'down');
     document.getElementById('mongo-state').textContent = snapshot.mongo_reachable ? 'reachable' : 'down';
+    document.getElementById('ws-clients').textContent = fmtNum(snapshot.websocket_clients);
     document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
 
     // Transports
@@ -147,7 +151,7 @@
     const now = Date.now() / 1000;
     const tableBody = document.getElementById('tables-body');
     if (!snapshot.tables || snapshot.tables.length === 0) {
-      tableBody.innerHTML = '<tr><td colspan="9" class="muted">no tables registered</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="10" class="muted">no tables registered</td></tr>';
     } else {
       tableBody.innerHTML = snapshot.tables.map(tb => {
         // Compute rate from previous sample
@@ -169,6 +173,10 @@
           ? `${tb.transport_name} ${pill('up', 'up')}`
           : `${tb.transport_name || '—'} ${pill('down', 'down')}`;
         const mode = tb.nats_mode || (tb.index ? 'upsert' : 'append');
+        const consumers = tb.consumers || 0;
+        const consumerCell = consumers > 0
+          ? `<strong>${fmtNum(consumers)}</strong>`
+          : `<span class="sub">${fmtNum(consumers)}</span>`;
         return `
           <tr>
             <td><strong>${tb.name}</strong></td>
@@ -176,6 +184,7 @@
             <td><code>${tb.topic || '—'}</code></td>
             <td>${mode}</td>
             <td class="num">${fmtNum(tb.row_count)}</td>
+            <td class="num">${consumerCell}</td>
             <td class="num"><strong>${fmtRate(rate)}</strong></td>
             <td class="num">${fmtNum(tb.messages_received_total)}</td>
             <td class="num">${fmtNum(tb.messages_dropped_total)}</td>
